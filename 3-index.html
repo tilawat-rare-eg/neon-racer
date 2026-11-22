@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0b0a1a">
+<title>قاهرة درايف</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#0b0a1a; font-family:'Segoe UI',Tahoma,Arial,sans-serif; touch-action:none; user-select:none; -webkit-user-select:none; }
+  #game { position:fixed; inset:0; display:block; }
+  .overlay { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:20; background:radial-gradient(ellipse at 50% 35%, rgba(70,30,10,.5), rgba(8,6,20,.93) 75%); color:#fff; text-align:center; transition:opacity .4s; }
+  .hidden { opacity:0; pointer-events:none; }
+  h1 { font-size:clamp(34px,10vw,64px); font-weight:900; background:linear-gradient(180deg,#ffd75e,#ff7a18 55%,#ff2bd6); -webkit-background-clip:text; background-clip:text; color:transparent; filter:drop-shadow(0 0 18px rgba(255,122,24,.5)); margin-bottom:8px; }
+  .sub { color:#d8c9a8; font-size:15px; margin-bottom:26px; line-height:1.7; padding:0 24px; }
+  .btn { font-size:20px; font-weight:800; color:#1a0b02; background:linear-gradient(90deg,#ffd75e,#ff7a18); border:none; border-radius:999px; padding:14px 54px; cursor:pointer; box-shadow:0 0 24px rgba(255,122,24,.55); animation:pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { transform:scale(1.05); box-shadow:0 0 36px rgba(255,122,24,.8);} }
+  #hud { position:fixed; top:calc(env(safe-area-inset-top,0px) + 10px); left:0; width:100%; display:flex; justify-content:space-between; align-items:flex-start; padding:0 14px; z-index:10; color:#fff; font-weight:800; font-size:17px; text-shadow:0 0 8px rgba(0,0,0,.9); pointer-events:none; direction:ltr; }
+  #hud .coin { color:#ffd75e; }
+  #minimap { position:fixed; top:calc(env(safe-area-inset-top,0px) + 44px); left:14px; z-index:10; border-radius:10px; border:1px solid rgba(255,215,94,.35); opacity:.85; pointer-events:none; }
+  .ctl { position:fixed; bottom:calc(env(safe-area-inset-bottom,0px) + 18px); z-index:10; display:flex; gap:14px; }
+  .ctl button { width:72px; height:72px; border-radius:50%; border:2px solid rgba(255,215,94,.4); background:rgba(20,16,40,.55); color:#ffd75e; font-size:28px; font-weight:900; backdrop-filter:blur(4px); }
+  .ctl button:active { background:rgba(255,215,94,.35); }
+  #steer { left:16px; }
+  #pedals { right:16px; flex-direction:column; gap:12px; }
+  #pedals button { width:64px; height:64px; font-size:22px; }
+  #toast { position:fixed; top:22%; width:100%; text-align:center; z-index:15; color:#ffd75e; font-size:24px; font-weight:900; text-shadow:0 0 14px rgba(0,0,0,.9); opacity:0; transition:opacity .5s; pointer-events:none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<canvas id="minimap" width="120" height="120"></canvas>
+<div id="hud" class="hidden"><div id="hudSpeed">0 كم/س</div><div class="coin" id="hudCoins">🪙 0 / 30</div></div>
+<div class="ctl hidden" id="steer"><button id="btnL">▶</button><button id="btnR">◀</button></div>
+<div class="ctl hidden" id="pedals"><button id="btnG">▲</button><button id="btnB">▼</button></div>
+<div id="toast"></div>
+<div id="startScreen" class="overlay">
+  <h1>قاهرة درايف</h1>
+  <div class="sub">سوق براحتك في شوارع القاهرة بالليل 🌙<br>النيل والزمالك والكباري مستنيينك.. لمّ العملات الـ٣٠</div>
+  <button class="btn" id="startBtn">يلا نسوق 🚗</button>
+</div>
+<script>
+const cv = document.getElementById('game'), ctx = cv.getContext('2d');
+const mm = document.getElementById('minimap'), mctx = mm.getContext('2d');
+let W, H, DPR;
+function resize(){ DPR = Math.min(devicePixelRatio||1, 2); W = innerWidth; H = innerHeight; cv.width = W*DPR; cv.height = H*DPR; cv.style.width=W+'px'; cv.style.height=H+'px'; ctx.setTransform(DPR,0,0,DPR,0,0); }
+addEventListener('resize', resize); resize();
+
+// ---------- Cairo map ----------
+const WORLD = 2600;
+const NILE = { x1: 1000, x2: 1280 };
+const BRIDGES = [500, 1050, 1600, 2150];
+const ISLAND = { x1: 1018, x2: 1262, y1: 780, y2: 1360 };  // الزمالك
+const TOWER = { x: 1140, y: 1075 };
+const ROAD_W = 66;
+const GRID = 320;
+let buildings = [], palms = [], minarets = [], lamps = [], coinsW = [], boats = [], dust = [];
+
+function rnd(a,b){ return a + Math.random()*(b-a); }
+function inNile(x,y,pad=0){ if(x > NILE.x1-pad && x < NILE.x2+pad){
+    if(ISLAND.x1-pad < x && x < ISLAND.x2+pad && ISLAND.y1-pad < y && y < ISLAND.y2+pad) return false;
+    for(const by of BRIDGES) if(Math.abs(y-by) < 34+pad) return false;
+    return true; } return false; }
+
+function genCity(){
+  buildings = []; palms = []; minarets = []; lamps = []; boats = [];
+  for(let bx = GRID; bx < WORLD - GRID + 1; bx += GRID){
+    for(let by = GRID; by < WORLD - GRID + 1; by += GRID){
+      const x0 = bx - GRID + ROAD_W/2 + 16, y0 = by - GRID + ROAD_W/2 + 16, x1 = bx - ROAD_W/2 - 16, y1 = by - ROAD_W/2 - 16;
+      if(x1 - x0 < 40 || y1 - y0 < 40) continue;
+      if(x1 > NILE.x1 - 20 && x0 < NILE.x2 + 20) continue;   // skip Nile blocks
+      const n = Math.floor(rnd(2, 5));
+      for(let i=0;i<n;i++){
+        const w = rnd(46, Math.min(110, x1-x0)), h = rnd(46, Math.min(110, y1-y0));
+        const x = rnd(x0, x1 - w), y = rnd(y0, y1 - h);
+        if(inNile(x + w/2, y + h/2)) continue;
+        const shade = rnd(0,1);
+        buildings.push({x, y, w, h, fl: Math.floor(rnd(3, 10)),
+          col: shade < .5 ? '#4a3b2e' : shade < .8 ? '#54452f' : '#3d3448',
+          roof: shade < .5 ? '#5d4c3c' : shade < .8 ? '#6a5840' : '#4c4360',
+          win: Math.random() < .75});
+      }
+      if(Math.random() < .3){ const bx2 = rnd(x0+20, x1-20), by2 = rnd(y0+20, y1-20);
+        if(!inNile(bx2, by2)) minarets.push({x:bx2, y:by2, dome: Math.random()<.7}); }
+    }
+  }
+  // palms along both Nile banks + island ring
+  for(let y = 60; y < WORLD - 60; y += 46){
+    palms.push({x: NILE.x1 - 26 + rnd(-6,6), y: y + rnd(-8,8)});
+    palms.push({x: NILE.x2 + 26 + rnd(-6,6), y: y + rnd(-8,8)});
+  }
+  for(let x = ISLAND.x1 + 14; x < ISLAND.x2; x += 44){
+    palms.push({x, y: ISLAND.y1 - 14 + rnd(-4,4)}); palms.push({x, y: ISLAND.y2 + 14 + rnd(-4,4)});
+  }
+  // street lamps along grid roads
+  for(let g = GRID; g < WORLD; g += GRID) for(let d = 80; d < WORLD; d += 160){
+    if(!inNile(g, d) && !inNile(d, g)){ lamps.push({x: g + ROAD_W/2 + 6, y: d}); lamps.push({x: d, y: g + ROAD_W/2 + 6}); } }
+  for(let i=0;i<5;i++) boats.push({x: rnd(NILE.x1+40, NILE.x2-40), y: rnd(0, WORLD), v: rnd(8, 18) * (Math.random()<.5?1:-1)});
+}
+function genCoins(){
+  coinsW = [];
+  const spots = [];
+  for(let i=0;i<24;i++){
+    const horiz = Math.random() < .5;
+    const g = GRID * Math.floor(rnd(1, WORLD/GRID - 1));
+    const d = rnd(200, WORLD - 200);
+    const x = horiz ? d : g, y = horiz ? g : d;
+    if(!inNile(x, y)) spots.push({x, y});
+  }
+  spots.push({x: TOWER.x + 60, y: TOWER.y});           // برج القاهرة
+  spots.push({x: NILE.x1 - 120, y: 1050});             // قرب الكوبري
+  spots.push({x: NILE.x2 + 120, y: 1600});
+  spots.push({x: 300, y: 300}, {x: WORLD - 300, y: 300}, {x: WORLD - 300, y: WORLD - 300}, {x: 300, y: WORLD - 300});
+  coinsW = spots.map(s => ({...s, got: false, spin: Math.random() * 6}));
+}
+genCity(); genCoins();
+// ---------- Car ----------
+const car = { x: 420, y: 420, a: 0, v: 0, maxV: 340 };
+const input = { gas: false, brake: false, left: false, right: false };
+let running = false, coinsGot = 0, lastT = 0, toastT = 0;
+
+function collide(nx, ny){
+  if(nx < 20 || ny < 20 || nx > WORLD - 20 || ny > WORLD - 20) return true;
+  if(inNile(nx, ny, 8)) return true;
+  const r = 15;
+  for(const b of buildings){
+    if(nx > b.x - r && nx < b.x + b.w + r && ny > b.y - r && ny < b.y + b.h + r) return true;
+  }
+  return false;
+}
+function physics(dt){
+  const accel = input.gas ? 260 : 0, brake = input.brake ? 340 : 0;
+  if(input.gas) car.v += accel * dt;
+  else if(input.brake){ if(car.v > 5) car.v -= brake * dt; else car.v = Math.max(car.v - 130 * dt, -110); }
+  else car.v -= car.v * 0.7 * dt;
+  car.v = Math.max(-110, Math.min(car.maxV, car.v));
+  const steer = (input.left ? -1 : 0) + (input.right ? 1 : 0);
+  if(steer && Math.abs(car.v) > 2){
+    const sf = Math.min(1, Math.abs(car.v) / 120) * Math.sign(car.v);
+    car.a += steer * 2.4 * sf * dt;
+    if(Math.abs(car.v) > 180 && Math.random() < .6) dust.push({x: car.x - Math.cos(car.a)*24 + rnd(-6,6), y: car.y - Math.sin(car.a)*24 + rnd(-6,6), life: .8, sz: rnd(3,7)});
+  }
+  const nx = car.x + Math.cos(car.a) * car.v * dt;
+  const ny = car.y + Math.sin(car.a) * car.v * dt;
+  if(!collide(nx, car.y)) car.x = nx; else car.v *= -0.25;
+  if(!collide(car.x, ny)) car.y = ny; else car.v *= -0.25;
+  // coins
+  for(const c of coinsW){ if(!c.got && Math.hypot(c.x - car.x, c.y - car.y) < 34){ c.got = true; coinsGot++;
+    for(let i=0;i<14;i++) dust.push({x:c.x, y:c.y, life:.7, sz:rnd(2,5), gold:true});
+    toast(coinsGot >= 30 ? 'جمعتهم كلهم! بطل 🏆' : ['برج القاهرة! 🗼','عاش يا وحش 🔥','جامد!','يلا بينا 🚗','برافو عليك ⭐'][Math.floor(Math.random()*5)]);
+    if(navigator.vibrate) navigator.vibrate(40); } }
+  for(const b of boats){ b.y += b.v * dt; if(b.y < -40) b.y = WORLD + 40; if(b.y > WORLD + 40) b.y = -40; }
+  for(let i = dust.length - 1; i >= 0; i--){ dust[i].life -= dt * 1.4; if(dust[i].life <= 0) dust.splice(i,1); }
+  document.getElementById('hudSpeed').textContent = Math.round(Math.abs(car.v) * 0.55) + ' كم/س';
+  document.getElementById('hudCoins').textContent = '🪙 ' + coinsGot + ' / 30';
+}
+function toast(t){ const el = document.getElementById('toast'); el.textContent = t; el.style.opacity = 1; toastT = 1.6; }
+
+// ---------- Render ----------
+function visible(x, y, m){ return x > camX - m && x < camX + W + m && y > camY - m && y < camY + H + m; }
+let camX = 0, camY = 0;
+function draw(t){
+  camX = Math.max(-60, Math.min(WORLD - W + 60, car.x - W/2));
+  camY = Math.max(-60, Math.min(WORLD - H + 60, car.y - H/2));
+  ctx.save(); ctx.translate(-camX, -camY);
+  // ground
+  const g = ctx.createLinearGradient(camX, camY, camX + W, camY + H);
+  g.addColorStop(0, '#141126'); g.addColorStop(1, '#1b1530');
+  ctx.fillStyle = g; ctx.fillRect(camX, camY, W, H);
+  // Nile
+  ctx.fillStyle = '#0d2b4d'; ctx.fillRect(NILE.x1, camY - 20, NILE.x2 - NILE.x1, H + 40);
+  ctx.strokeStyle = 'rgba(125,249,255,.18)'; ctx.lineWidth = 2;
+  const off = (t * 0.02) % 60;
+  for(let y = camY - 60 + off; y < camY + H + 60; y += 60){
+    ctx.beginPath(); ctx.moveTo(NILE.x1 + 20, y); ctx.quadraticCurveTo((NILE.x1+NILE.x2)/2, y + 14, NILE.x2 - 20, y); ctx.stroke();
+  }
+  // island
+  ctx.fillStyle = '#1c2b1c'; rr(ISLAND.x1, ISLAND.y1, ISLAND.x2-ISLAND.x1, ISLAND.y2-ISLAND.y1, 40); ctx.fill();
+  // roads
+  ctx.strokeStyle = '#2c2a40'; ctx.lineWidth = ROAD_W; ctx.lineCap = 'round';
+  for(let gI = GRID; gI < WORLD; gI += GRID){
+    ctx.beginPath(); ctx.moveTo(gI, camY - 40); ctx.lineTo(gI, camY + H + 40); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(camX - 40, gI); ctx.lineTo(camX + W + 40, gI); ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(255,215,94,.35)'; ctx.lineWidth = 2; ctx.setLineDash([18, 22]);
+  for(let gI = GRID; gI < WORLD; gI += GRID){
+    ctx.beginPath(); ctx.moveTo(gI, camY - 40); ctx.lineTo(gI, camY + H + 40); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(camX - 40, gI); ctx.lineTo(camX + W + 40, gI); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  // bridges
+  for(const by of BRIDGES){
+    ctx.fillStyle = '#3a3550'; ctx.fillRect(NILE.x1 - 14, by - 32, NILE.x2 - NILE.x1 + 28, 64);
+    ctx.strokeStyle = '#ffd75e'; ctx.lineWidth = 3;
+    ctx.strokeRect(NILE.x1 - 14, by - 32, NILE.x2 - NILE.x1 + 28, 64);
+    ctx.strokeStyle = 'rgba(255,215,94,.3)'; ctx.lineWidth = 2; ctx.setLineDash([14,18]);
+    ctx.beginPath(); ctx.moveTo(NILE.x1 - 14, by); ctx.lineTo(NILE.x2 + 14, by); ctx.stroke(); ctx.setLineDash([]);
+  }
+  // boats (فلوكة)
+  for(const b of boats){ if(!visible(b.x, b.y, 60)) continue;
+    ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(b.v > 0 ? Math.PI/2 : -Math.PI/2);
+    ctx.fillStyle = '#8a6b45'; rr(-8, -22, 16, 44, 8); ctx.fill();
+    ctx.fillStyle = '#f5ecd7'; ctx.beginPath(); ctx.moveTo(0, -16); ctx.lineTo(10, 12); ctx.lineTo(-10, 12); ctx.closePath(); ctx.fill();
+    ctx.restore(); }
+  // buildings
+  for(const b of buildings){ if(!visible(b.x + b.w/2, b.y + b.h/2, 200)) continue;
+    ctx.fillStyle = 'rgba(0,0,0,.4)'; ctx.fillRect(b.x + 5, b.y + 6, b.w, b.h);
+    ctx.fillStyle = b.col; ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.fillStyle = b.roof; ctx.fillRect(b.x + 4, b.y + 4, b.w - 8, b.h - 8);
+    if(b.win){ ctx.fillStyle = 'rgba(255,190,80,.5)';
+      const cols = Math.floor((b.w - 12) / 16), rows = Math.floor((b.h - 12) / 16);
+      for(let i = 0; i < cols; i++) for(let j = 0; j < rows; j++)
+        if((i * 7 + j * 13 + b.fl) % 3) ctx.fillRect(b.x + 8 + i * 16, b.y + 8 + j * 16, 6, 8);
+    }
+  }
+  // palms
+  for(const p of palms){ if(!visible(p.x, p.y, 60)) continue;
+    ctx.fillStyle = '#0e3d1e'; for(let k = 0; k < 5; k++){ const an = k * 1.26 + 0.4;
+      ctx.beginPath(); ctx.ellipse(p.x + Math.cos(an) * 7, p.y + Math.sin(an) * 7, 8, 3.4, an, 0, Math.PI * 2); ctx.fill(); }
+    ctx.fillStyle = '#4c3a22'; ctx.beginPath(); ctx.arc(p.x, p.y, 2.6, 0, Math.PI * 2); ctx.fill(); }
+  // minarets + domes
+  for(const m of minarets){ if(!visible(m.x, m.y, 80)) continue;
+    if(m.dome){ ctx.fillStyle = '#2f6b4f'; ctx.beginPath(); ctx.arc(m.x, m.y, 12, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#48a37b'; ctx.beginPath(); ctx.arc(m.x - 3, m.y - 3, 5, 0, Math.PI * 2); ctx.fill(); }
+    ctx.fillStyle = '#d8c9a8'; ctx.fillRect(m.x + 16, m.y - 3, 5, 26);
+    ctx.fillStyle = '#ffd75e'; ctx.beginPath(); ctx.arc(m.x + 18.5, m.y - 6, 3.4, 0, Math.PI * 2); ctx.fill(); }
+  // Cairo Tower
+  ctx.save(); ctx.translate(TOWER.x, TOWER.y);
+  ctx.fillStyle = 'rgba(0,0,0,.4)'; ctx.beginPath(); ctx.arc(4, 5, 22, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#c9b184'; ctx.beginPath(); ctx.arc(0, 0, 20, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#8a6b45'; ctx.beginPath(); ctx.arc(0, 0, 13, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#ffd75e'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, 0, 20, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+  // lamps glow
+  for(const l of lamps){ if(!visible(l.x, l.y, 40)) continue;
+    const lg = ctx.createRadialGradient(l.x, l.y, 1, l.x, l.y, 22);
+    lg.addColorStop(0, 'rgba(255,200,90,.4)'); lg.addColorStop(1, 'rgba(255,200,90,0)');
+    ctx.fillStyle = lg; ctx.beginPath(); ctx.arc(l.x, l.y, 22, 0, Math.PI * 2); ctx.fill(); }
+  // coins
+  for(const c of coinsW){ if(c.got || !visible(c.x, c.y, 40)) continue;
+    const s = 10 * (0.8 + 0.2 * Math.abs(Math.sin(t * 0.005 + c.spin)));
+    ctx.save(); ctx.translate(c.x, c.y); ctx.shadowColor = '#ffd75e'; ctx.shadowBlur = 14;
+    ctx.fillStyle = '#ffd75e'; ctx.beginPath(); ctx.arc(0, 0, s, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0; ctx.fillStyle = '#c98a12'; ctx.font = 'bold ' + Math.round(s) + 'px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('£', 0, 1); ctx.restore(); }
+  // dust
+  for(const p of dust){ if(!visible(p.x, p.y, 40)) continue;
+    ctx.globalAlpha = Math.max(0, p.life * .8); ctx.fillStyle = p.gold ? '#ffd75e' : '#9a8f86';
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.sz * p.life + 1, 0, Math.PI * 2); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  drawCar(); ctx.restore();
+  // night vignette
+  const vg = ctx.createRadialGradient(W/2, H/2, Math.min(W,H) * .45, W/2, H/2, Math.max(W,H) * .8);
+  vg.addColorStop(0, 'rgba(6,4,18,0)'); vg.addColorStop(1, 'rgba(6,4,18,.55)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  drawMinimap();
+}
+function rr(x, y, w, h, r){ ctx.beginPath(); ctx.moveTo(x+r, y); ctx.arcTo(x+w, y, x+w, y+h, r); ctx.arcTo(x+w, y+h, x, y+h, r); ctx.arcTo(x, y+h, x, y, r); ctx.arcTo(x, y, x+w, y, r); ctx.closePath(); }
+function drawCar(){
+  ctx.save(); ctx.translate(car.x, car.y); ctx.rotate(car.a + Math.PI/2);
+  // headlights
+  const hg = ctx.createRadialGradient(0, -40, 4, 0, -90, 110);
+  hg.addColorStop(0, 'rgba(255,248,200,.35)'); hg.addColorStop(1, 'rgba(255,248,200,0)');
+  ctx.fillStyle = hg; ctx.beginPath(); ctx.moveTo(-9, -26); ctx.lineTo(-30, -120); ctx.lineTo(30, -120); ctx.lineTo(9, -26); ctx.closePath(); ctx.fill();
+  const w = 26, h = 50;
+  ctx.shadowColor = '#ff2bd6'; ctx.shadowBlur = 16;
+  const bg = ctx.createLinearGradient(0, -h/2, 0, h/2); bg.addColorStop(0, '#ff9df0'); bg.addColorStop(.3, '#ff2bd6'); bg.addColorStop(1, '#6e0960');
+  ctx.fillStyle = bg; rr(-w/2, -h/2, w, h, 7); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = 'rgba(10,15,35,.92)'; rr(-w/2 + 3, -h/2 + 12, w - 6, 16, 4); ctx.fill();
+  ctx.fillStyle = 'rgba(125,249,255,.3)'; rr(-w/2 + 4, -h/2 + 13, w - 8, 5, 3); ctx.fill();
+  ctx.fillStyle = '#05050a';
+  [[-w/2 - 2, -h/2 + 7], [w/2 - 4, -h/2 + 7], [-w/2 - 2, h/2 - 15], [w/2 - 4, h/2 - 15]].forEach(p => { ctx.fillRect(p[0], p[1], 6, 10); });
+  ctx.fillStyle = '#fff8c8'; ctx.fillRect(-w/2 + 3, -h/2, 7, 3); ctx.fillRect(w/2 - 10, -h/2, 7, 3);
+  ctx.fillStyle = '#ff3050'; ctx.fillRect(-w/2 + 3, h/2 - 3, 7, 3); ctx.fillRect(w/2 - 10, h/2 - 3, 7, 3);
+  ctx.restore();
+}
+function drawMinimap(){
+  const s = 120 / WORLD;
+  mctx.clearRect(0, 0, 120, 120);
+  mctx.fillStyle = 'rgba(10,8,24,.85)'; mctx.fillRect(0, 0, 120, 120);
+  mctx.fillStyle = '#0d2b4d'; mctx.fillRect(NILE.x1 * s, 0, (NILE.x2 - NILE.x1) * s, 120);
+  mctx.fillStyle = '#1c2b1c'; mctx.fillRect(ISLAND.x1 * s, ISLAND.y1 * s, (ISLAND.x2 - ISLAND.x1) * s, (ISLAND.y2 - ISLAND.y1) * s);
+  mctx.strokeStyle = 'rgba(255,255,255,.14)'; mctx.lineWidth = 1;
+  for(let gI = GRID; gI < WORLD; gI += GRID){
+    mctx.beginPath(); mctx.moveTo(gI * s, 0); mctx.lineTo(gI * s, 120); mctx.stroke();
+    mctx.beginPath(); mctx.moveTo(0, gI * s); mctx.lineTo(120, gI * s); mctx.stroke(); }
+  mctx.fillStyle = '#ffd75e';
+  for(const c of coinsW) if(!c.got) mctx.fillRect(c.x * s - 1, c.y * s - 1, 2.4, 2.4);
+  mctx.fillStyle = '#ff2bd6'; mctx.beginPath(); mctx.arc(car.x * s, car.y * s, 3.4, 0, Math.PI * 2); mctx.fill();
+  mctx.strokeStyle = '#fff'; mctx.lineWidth = 1; mctx.beginPath();
+  mctx.moveTo(car.x * s, car.y * s); mctx.lineTo(car.x * s + Math.cos(car.a) * 8, car.y * s + Math.sin(car.a) * 8); mctx.stroke();
+}
+
+// ---------- Input ----------
+function bindHold(id, key){ const el = document.getElementById(id);
+  const on = e => { e.preventDefault(); input[key] = true; };
+  const off = e => { e.preventDefault(); input[key] = false; };
+  el.addEventListener('pointerdown', on); el.addEventListener('pointerup', off);
+  el.addEventListener('pointerleave', off); el.addEventListener('pointercancel', off); }
+bindHold('btnG', 'gas'); bindHold('btnB', 'brake'); bindHold('btnL', 'left'); bindHold('btnR', 'right');
+addEventListener('keydown', e => {
+  if(e.key === 'ArrowUp') input.gas = true; if(e.key === 'ArrowDown') input.brake = true;
+  if(e.key === 'ArrowLeft') input.left = true; if(e.key === 'ArrowRight') input.right = true;
+  if((e.key === ' ' || e.key === 'Enter') && !running) start(); });
+addEventListener('keyup', e => {
+  if(e.key === 'ArrowUp') input.gas = false; if(e.key === 'ArrowDown') input.brake = false;
+  if(e.key === 'ArrowLeft') input.left = false; if(e.key === 'ArrowRight') input.right = false; });
+
+function start(){
+  running = true;
+  document.getElementById('startScreen').classList.add('hidden');
+  document.getElementById('hud').classList.remove('hidden');
+  document.getElementById('steer').classList.remove('hidden');
+  document.getElementById('pedals').classList.remove('hidden');
+  toast('اتحرك بحرية.. روح شوف برج القاهرة 🗼');
+}
+document.getElementById('startBtn').onclick = start;
+
+function loop(t){
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0); lastT = t;
+  if(running) physics(dt);
+  if(toastT > 0){ toastT -= dt; if(toastT <= 0) document.getElementById('toast').style.opacity = 0; }
+  draw(t);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
